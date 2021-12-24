@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,26 +31,37 @@ import (
 )
 
 var (
-	cmd        string
-	pdMain     string
-	pdRecovery string
-	threads    int
-	keyCount   int
-	valueBase  int
-	sleep      int
+	pdMain        string
+	pdRecovery    string
+	threads       int
+	keysPerThread int
+	valueBase     int
+	sleep         int
+	logLevel      string
+	cmdPut        bool
+	cmdVerify     bool
+	paddingLen    int
+	padding       string
 )
 
+const VALUE_BASE_MAX = 10000
+const DEFAULT_PADDING_LEN = 64
+const KEY_RANGE = 1e8
+
 func init() {
-	flag.StringVar(&cmd, "cmd", "BOTH", "PUT/VERIFY/BOTH")
+	flag.BoolVar(&cmdPut, "put", false, "PUT workload")
+	flag.BoolVar(&cmdVerify, "verify", false, "VERIFY result")
 	flag.StringVar(&pdMain, "main", "http://127.0.0.1:2379", "main cluster pd addr, default: http://127.0.0.1:2379")
 	flag.StringVar(&pdRecovery, "recovery", "http://127.0.0.1:2379", "secondary cluster pd addr, default: http://127.0.0.1:2379")
 	flag.IntVar(&threads, "threads", 10, "# of threads")
-	flag.IntVar(&keyCount, "keys", 10, "# of keys")
-	flag.IntVar(&valueBase, "value", 0, "value to put / verify")
+	flag.IntVar(&keysPerThread, "keys", 10, "# of keys per thread")
+	flag.IntVar(&valueBase, "value", 0, "value to put / verify. Unset or 0 to get a random value")
 	flag.IntVar(&sleep, "sleep", 1, "sleep seconds between PUT & Verify")
+	flag.StringVar(&logLevel, "log_level", "info", "log level [debug/info/error]")
+	flag.IntVar(&paddingLen, "pad", DEFAULT_PADDING_LEN, "value padding length")
 	flag.Parse()
 
-	conf := &log.Config{Level: "debug", File: log.FileLogConfig{
+	conf := &log.Config{Level: logLevel, File: log.FileLogConfig{
 		Filename: "rawkv_verify.log",
 	}}
 	logger, props, _ := log.InitLogger(conf)
@@ -58,16 +70,13 @@ func init() {
 	if valueBase == 0 {
 		s := rand.NewSource(time.Now().UnixNano())
 		r := rand.New(s)
-		valueBase = r.Intn(1000) + 1
+		valueBase = r.Intn(VALUE_BASE_MAX) + 1
 	}
+
+	padding = strings.Repeat("0", paddingLen)
 }
 
 func doPut() {
-	if keyCount%threads != 0 {
-		threads += 1
-	}
-	keyCountPerThread := keyCount / threads
-
 	var wg sync.WaitGroup
 	for i := 0; i < threads; i++ {
 		wg.Add(1)
@@ -82,16 +91,18 @@ func doPut() {
 			}
 			defer cli.Close()
 
-			log.Debug("PUT worker start", zap.Uint64("clusterID", cli.ClusterID()), zap.Int("thread", i))
+			log.Info("PUT worker start", zap.Uint64("clusterID", cli.ClusterID()), zap.Int("thread", i))
 
-			end := (i + 1) * keyCountPerThread
-			if end > keyCount {
-				end = keyCount
+			step := int(KEY_RANGE / keysPerThread / threads)
+			if step <= 0 {
+				step = 1
 			}
-			for k := i * keyCountPerThread; k < end; k++ {
-				key := fmt.Sprintf("vk%v", k)
-				val_1 := fmt.Sprintf("%v", valueBase-1)
-				val := fmt.Sprintf("%v", valueBase)
+			start := i * keysPerThread * step
+			end := (i + 1) * keysPerThread * step
+			for k := start; k < end; k += step {
+				key := fmt.Sprintf("vk%08d", k)
+				val_1 := fmt.Sprintf("%v_%v", valueBase-1, padding)
+				val := fmt.Sprintf("%v_%v", valueBase, padding)
 				log.Debug("PUT", zap.String("key", key), zap.String("val-1", val_1), zap.String("val", val))
 
 				err = cli.Put(ctx, []byte(key), []byte(val_1))
@@ -111,11 +122,6 @@ func doPut() {
 }
 
 func doVerify() {
-	if keyCount%threads != 0 {
-		threads += 1
-	}
-	keyCountPerThread := keyCount / threads
-
 	var wg sync.WaitGroup
 	for i := 0; i < threads; i++ {
 		wg.Add(1)
@@ -130,20 +136,23 @@ func doVerify() {
 			}
 			defer cli.Close()
 
-			log.Debug("VERIFY worker start", zap.Uint64("clusterID", cli.ClusterID()), zap.Int("thread", i))
+			log.Info("VERIFY worker start", zap.Uint64("clusterID", cli.ClusterID()), zap.Int("thread", i))
 
-			end := (i + 1) * keyCountPerThread
-			if end > keyCount {
-				end = keyCount
+			step := int(KEY_RANGE / keysPerThread / threads)
+			if step <= 0 {
+				step = 1
 			}
-			for k := i * keyCountPerThread; k < end; k++ {
-				key := fmt.Sprintf("vk%v", k)
+			start := i * keysPerThread * step
+			end := (i + 1) * keysPerThread * step
+			for k := start; k < end; k += step {
+				key := fmt.Sprintf("vk%08d", k)
 				expected := fmt.Sprintf("%v", valueBase)
 
 				val, err := cli.Get(ctx, []byte(key))
 				if err != nil {
 					panic(err)
 				}
+				val = val[0 : len(val)-paddingLen-1]
 				log.Debug("VERIFY", zap.String("key", key), zap.String("val-expected", expected), zap.String("got", string(val)))
 
 				if string(val) != expected {
@@ -161,9 +170,9 @@ func doVerify() {
 func main() {
 	fmt.Printf("Value Base: %v\n", valueBase)
 
-	if cmd == "PUT" {
+	if cmdPut {
 		doPut()
-	} else if cmd == "VERIFY" {
+	} else if cmdVerify {
 		doVerify()
 	} else {
 		fmt.Printf("Do PUT now.\n")
