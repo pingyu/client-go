@@ -33,8 +33,8 @@ import (
 var (
 	pdMain        string
 	pdRecovery    string
-	threads       int
-	keysPerThread int
+	threads       int64
+	keysPerThread int64
 	valueBase     int
 	sleep         int
 	logLevel      string
@@ -53,8 +53,8 @@ func init() {
 	flag.BoolVar(&cmdVerify, "verify", false, "VERIFY result")
 	flag.StringVar(&pdMain, "main", "http://127.0.0.1:2379", "main cluster pd addr, default: http://127.0.0.1:2379")
 	flag.StringVar(&pdRecovery, "recovery", "http://127.0.0.1:2379", "secondary cluster pd addr, default: http://127.0.0.1:2379")
-	flag.IntVar(&threads, "threads", 10, "# of threads")
-	flag.IntVar(&keysPerThread, "keys", 10, "# of keys per thread")
+	flag.Int64Var(&threads, "threads", 10, "# of threads")
+	flag.Int64Var(&keysPerThread, "keys", 10, "# of keys per thread")
 	flag.IntVar(&valueBase, "value", 0, "value to put / verify. Unset or 0 to get a random value")
 	flag.IntVar(&sleep, "sleep", 1, "sleep seconds between PUT & Verify")
 	flag.StringVar(&logLevel, "log_level", "info", "log level [debug/info/error]")
@@ -78,7 +78,7 @@ func init() {
 
 func doPut() {
 	var wg sync.WaitGroup
-	for i := 0; i < threads; i++ {
+	for i := int64(0); i < threads; i++ {
 		wg.Add(1)
 		i := i
 		go func() {
@@ -91,9 +91,9 @@ func doPut() {
 			}
 			defer cli.Close()
 
-			log.Info("PUT worker start", zap.Uint64("clusterID", cli.ClusterID()), zap.Int("thread", i))
+			log.Info("PUT worker start", zap.Uint64("clusterID", cli.ClusterID()), zap.Int64("thread", i))
 
-			step := int(KEY_RANGE / keysPerThread / threads)
+			step := int64(KEY_RANGE / keysPerThread / threads)
 			if step <= 0 {
 				step = 1
 			}
@@ -123,7 +123,7 @@ func doPut() {
 
 func doVerify() {
 	var wg sync.WaitGroup
-	for i := 0; i < threads; i++ {
+	for i := int64(0); i < threads; i++ {
 		wg.Add(1)
 		i := i
 		go func() {
@@ -136,9 +136,9 @@ func doVerify() {
 			}
 			defer cli.Close()
 
-			log.Info("VERIFY worker start", zap.Uint64("clusterID", cli.ClusterID()), zap.Int("thread", i))
+			log.Info("VERIFY worker start", zap.Uint64("clusterID", cli.ClusterID()), zap.Int64("thread", i))
 
-			step := int(KEY_RANGE / keysPerThread / threads)
+			step := int64(KEY_RANGE / keysPerThread / threads)
 			if step <= 0 {
 				step = 1
 			}
@@ -152,12 +152,17 @@ func doVerify() {
 				if err != nil {
 					panic(err)
 				}
-				val = val[0 : len(val)-paddingLen-1]
-				log.Debug("VERIFY", zap.String("key", key), zap.String("val-expected", expected), zap.String("got", string(val)))
+				if len(val) < paddingLen+1 {
+					log.Error("VERIFY ERROR, len(val) < paddingLen+1", zap.String("key", key), zap.String("got", string(val)), zap.Int("paddingLen", paddingLen))
+					fmt.Fprintf(os.Stderr, "VERIFY ERROR, len(val) < paddingLen+1: key: %v, got: %v, paddingLen: %v\n", key, string(val), paddingLen)
+				} else {
+					val = val[0 : len(val)-paddingLen-1]
+					log.Debug("VERIFY", zap.String("key", key), zap.String("val-expected", expected), zap.String("got", string(val)))
 
-				if string(val) != expected {
-					log.Error("VERIFY ERROR", zap.String("key", key), zap.String("val-expected", expected), zap.String("got", string(val)))
-					fmt.Fprintf(os.Stderr, "VERIFY ERROR: key: %v, value-expect: %v, got: %v\n", key, expected, string(val))
+					if string(val) != expected {
+						log.Error("VERIFY ERROR", zap.String("key", key), zap.String("val-expected", expected), zap.String("got", string(val)))
+						fmt.Fprintf(os.Stderr, "VERIFY ERROR: key: %v, value-expect: %v, got: %v\n", key, expected, string(val))
+					}
 				}
 			}
 
