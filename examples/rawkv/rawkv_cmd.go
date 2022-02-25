@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/pingcap/log"
 	"github.com/tikv/client-go/v2/config"
@@ -29,8 +30,8 @@ func main() {
 	logger, props, _ := log.InitLogger(conf)
 	log.ReplaceGlobals(logger, props)
 
-	if len(os.Args) != 5 {
-		fmt.Printf("%s <pd-url> <get/put/del> <key> <value>\n", os.Args[0])
+	if len(os.Args) < 5 {
+		fmt.Printf("%s <pd-url> <get/put/put-ttl/del> <key> <value>\n", os.Args[0])
 		return
 	}
 
@@ -54,6 +55,16 @@ func main() {
 			panic(err)
 		}
 		fmt.Printf("Successfully put %s:%s to tikv\n", key, value)
+	} else if oper == "put-ttl" {
+		ttl, err := strconv.Atoi(os.Args[5])
+		if err != nil {
+			panic(err)
+		}
+		err = cli.PutWithTTL(context.TODO(), key, value, uint64(ttl))
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("Successfully put-ttl %s:%s (ttl: %v) to tikv\n", key, value, ttl)
 	} else if oper == "get" {
 		// get key from tikv
 		val, err := cli.Get(context.TODO(), key)
