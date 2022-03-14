@@ -21,7 +21,6 @@ import (
 	"strconv"
 
 	"github.com/pingcap/log"
-	"github.com/tikv/client-go/v2/config"
 	"github.com/tikv/client-go/v2/rawkv"
 )
 
@@ -40,7 +39,8 @@ func main() {
 	key := []byte(os.Args[3])
 	value := []byte(os.Args[4])
 
-	cli, err := rawkv.NewClient(context.TODO(), []string{pd}, config.DefaultConfig().Security)
+	// cli, err := rawkv.NewClient(context.TODO(), []string{pd}, config.DefaultConfig().Security)
+	cli, err := rawkv.NewClientV2(context.TODO(), []string{pd})
 	if err != nil {
 		panic(err)
 	}

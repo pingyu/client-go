@@ -48,6 +48,7 @@ import (
 	"github.com/tikv/client-go/v2/internal/locate"
 	"github.com/tikv/client-go/v2/internal/retry"
 	"github.com/tikv/client-go/v2/metrics"
+	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	pd "github.com/tikv/pd/client"
 )
@@ -116,6 +117,7 @@ type Client struct {
 	rpcClient   client.Client
 	cf          string
 	atomic      bool
+	apiVersion  kvrpcpb.APIVersion
 }
 
 // SetAtomicForCAS sets atomic mode for CompareAndSwap
@@ -145,6 +147,22 @@ func NewClient(ctx context.Context, pdAddrs []string, security config.Security, 
 		regionCache: locate.NewRegionCache(pdCli),
 		pdClient:    pdCli,
 		rpcClient:   client.NewRPCClient(client.WithSecurity(security)),
+		apiVersion:  kvrpcpb.APIVersion_V1,
+	}, nil
+}
+
+func NewClientV2(ctx context.Context, pdAddrs []string) (*Client, error) {
+	cfg := config.GetGlobalConfig()
+	pdCli, err := tikv.NewPDClient(pdAddrs)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	return &Client{
+		clusterID:   pdCli.GetClusterID(ctx),
+		regionCache: locate.NewRegionCache(pdCli),
+		pdClient:    pdCli,
+		rpcClient:   client.NewRPCClient(client.WithSecurity(cfg.Security)),
+		apiVersion:  kvrpcpb.APIVersion_V2,
 	}, nil
 }
 
@@ -172,13 +190,22 @@ func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]b
 	start := time.Now()
 	defer func() { metrics.RawkvCmdHistogramWithGet.Observe(time.Since(start).Seconds()) }()
 
+	rctx := kvrpcpb.Context{
+		ApiVersion: c.apiVersion,
+	}
+	if c.apiVersion == kvrpcpb.APIVersion_V2 {
+		key = append([]byte{'r'}, key...)
+	}
+
 	opts := c.getRawKVOptions(options...)
 	req := tikvrpc.NewRequest(
 		tikvrpc.CmdRawGet,
 		&kvrpcpb.RawGetRequest{
 			Key: key,
 			Cf:  c.getColumnFamily(opts),
-		})
+		},
+		rctx,
+	)
 	resp, _, err := c.sendReq(ctx, key, req, false)
 	if err != nil {
 		return nil, err
@@ -240,6 +267,13 @@ func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, 
 		return errors.New("empty value is not supported")
 	}
 
+	rctx := kvrpcpb.Context{
+		ApiVersion: c.apiVersion,
+	}
+	if c.apiVersion == kvrpcpb.APIVersion_V2 {
+		key = append([]byte{'r'}, key...)
+	}
+
 	opts := c.getRawKVOptions(options...)
 	req := tikvrpc.NewRequest(tikvrpc.CmdRawPut, &kvrpcpb.RawPutRequest{
 		Key:    key,
@@ -247,7 +281,7 @@ func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, 
 		Ttl:    ttl,
 		Cf:     c.getColumnFamily(opts),
 		ForCas: c.atomic,
-	})
+	}, rctx)
 	resp, _, err := c.sendReq(ctx, key, req, false)
 	if err != nil {
 		return err
