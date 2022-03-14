@@ -50,7 +50,6 @@ import (
 	"github.com/ninedraft/israce"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
-	drivertxn "github.com/pingcap/tidb/store/driver/txn"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/suite"
 	"github.com/tikv/client-go/v2/config"
@@ -230,7 +229,9 @@ func (s *testCommitterSuite) TestCommitOnTiKVDiskFullOpt() {
 	s.Nil(failpoint.Enable("tikvclient/rpcAllowedOnAlmostFull", `return("true")`))
 	txn = s.begin()
 	txn.Set([]byte("c"), []byte("c1"))
-	err = txn.Commit(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err = txn.Commit(ctx)
 	s.NotNil(err)
 	s.Nil(failpoint.Disable("tikvclient/rpcAllowedOnAlmostFull"))
 }
@@ -528,7 +529,7 @@ func (s *testCommitterSuite) TestPrewritePrimaryKeyFailed() {
 func (s *testCommitterSuite) TestWrittenKeysOnConflict() {
 	// This test checks that when there is a write conflict, written keys is collected,
 	// so we can use it to clean up keys.
-	region, _ := s.cluster.GetRegionByKey([]byte("x"))
+	region, _, _ := s.cluster.GetRegionByKey([]byte("x"))
 	newRegionID := s.cluster.AllocID()
 	newPeerID := s.cluster.AllocID()
 	s.cluster.Split(region.Id, newRegionID, []byte("y"), []uint64{newPeerID}, newPeerID)
@@ -559,7 +560,7 @@ func (s *testCommitterSuite) TestWrittenKeysOnConflict() {
 
 func (s *testCommitterSuite) TestPrewriteTxnSize() {
 	// Prepare two regions first: (, 100) and [100, )
-	region, _ := s.cluster.GetRegionByKey([]byte{50})
+	region, _, _ := s.cluster.GetRegionByKey([]byte{50})
 	newRegionID := s.cluster.AllocID()
 	newPeerID := s.cluster.AllocID()
 	s.cluster.Split(region.Id, newRegionID, []byte{100}, []uint64{newPeerID}, newPeerID)
@@ -744,6 +745,39 @@ func (s *testCommitterSuite) TestPessimisticLockReturnValues() {
 	s.Len(lockCtx.Values, 2)
 	s.Equal(lockCtx.Values[string(key)].Value, key)
 	s.Equal(lockCtx.Values[string(key2)].Value, key2)
+}
+
+func (s *testCommitterSuite) TestPessimisticLockCheckExistence() {
+	key := []byte("key")
+	key2 := []byte("key2")
+	txn := s.begin()
+	s.Nil(txn.Set(key, key))
+	s.Nil(txn.Commit(context.Background()))
+
+	txn = s.begin()
+	txn.SetPessimistic(true)
+	lockCtx := &kv.LockCtx{ForUpdateTS: txn.StartTS(), WaitStartTime: time.Now()}
+	lockCtx.InitCheckExistence(2)
+	s.Nil(txn.LockKeys(context.Background(), lockCtx, key, key2))
+	s.Len(lockCtx.Values, 2)
+	s.Empty(lockCtx.Values[string(key)].Value)
+	s.True(lockCtx.Values[string(key)].Exists)
+	s.Empty(lockCtx.Values[string(key2)].Value)
+	s.False(lockCtx.Values[string(key2)].Exists)
+	s.Nil(txn.Rollback())
+
+	txn = s.begin()
+	txn.SetPessimistic(true)
+	lockCtx = &kv.LockCtx{ForUpdateTS: txn.StartTS(), WaitStartTime: time.Now()}
+	lockCtx.InitCheckExistence(2)
+	lockCtx.InitReturnValues(2)
+	s.Nil(txn.LockKeys(context.Background(), lockCtx, key, key2))
+	s.Len(lockCtx.Values, 2)
+	s.Equal(lockCtx.Values[string(key)].Value, key)
+	s.True(lockCtx.Values[string(key)].Exists)
+	s.Empty(lockCtx.Values[string(key2)].Value)
+	s.False(lockCtx.Values[string(key2)].Exists)
+	s.Nil(txn.Rollback())
 }
 
 // TestElapsedTTL tests that elapsed time is correct even if ts physical time is greater than local time.
@@ -1054,12 +1088,23 @@ func (s *testCommitterSuite) TestPessimisticLockPrimary() {
 	s.Equal(tikverr.ErrLockWaitTimeout, errors.Unwrap(waitErr))
 }
 
+type kvFilter struct{}
+
+func (f kvFilter) IsUnnecessaryKeyValue(key, value []byte, flags kv.KeyFlags) (bool, error) {
+	untouched := bytes.Equal(key, []byte("t00000001_i000000001"))
+	if untouched && flags.HasPresumeKeyNotExists() {
+		return false, errors.New("unexpected path the untouched key value with PresumeKeyNotExists flag")
+	}
+	return untouched, nil
+}
+
 func (s *testCommitterSuite) TestResolvePessimisticLock() {
 	untouchedIndexKey := []byte("t00000001_i000000001")
 	untouchedIndexValue := []byte{0, 0, 0, 0, 0, 0, 0, 1, 49}
 	noValueIndexKey := []byte("t00000001_i000000002")
+
 	txn := s.begin()
-	txn.SetKVFilter(drivertxn.TiDBKVFilter{})
+	txn.SetKVFilter(kvFilter{})
 	err := txn.Set(untouchedIndexKey, untouchedIndexValue)
 	s.Nil(err)
 	lockCtx := kv.NewLockCtx(txn.StartTS(), kv.LockNoWait, time.Now())
@@ -1083,8 +1128,8 @@ func (s *testCommitterSuite) TestCommitDeadLock() {
 	k1 := []byte("a_deadlock_k1")
 	k2 := []byte("y_deadlock_k2")
 
-	region1, _ := s.cluster.GetRegionByKey(k1)
-	region2, _ := s.cluster.GetRegionByKey(k2)
+	region1, _, _ := s.cluster.GetRegionByKey(k1)
+	region2, _, _ := s.cluster.GetRegionByKey(k2)
 	s.True(region1.Id != region2.Id)
 
 	txn1 := s.begin()
@@ -1215,7 +1260,7 @@ func (s *testCommitterSuite) TestResolveMixed() {
 	// stop txn ttl manager and remove primary key, make the other keys left behind
 	committer.CloseTTLManager()
 	muts := transaction.NewPlainMutations(1)
-	muts.Push(kvrpcpb.Op_Lock, pk, nil, true)
+	muts.Push(kvrpcpb.Op_Lock, pk, nil, true, false, false)
 	err = committer.PessimisticRollbackMutations(context.Background(), &muts)
 	s.Nil(err)
 
@@ -1244,7 +1289,7 @@ func (s *testCommitterSuite) TestResolveMixed() {
 // accurate list of secondary keys.
 func (s *testCommitterSuite) TestPrewriteSecondaryKeys() {
 	// Prepare two regions first: (, 100) and [100, )
-	region, _ := s.cluster.GetRegionByKey([]byte{50})
+	region, _, _ := s.cluster.GetRegionByKey([]byte{50})
 	newRegionID := s.cluster.AllocID()
 	newPeerID := s.cluster.AllocID()
 	s.cluster.Split(region.Id, newRegionID, []byte{100}, []uint64{newPeerID}, newPeerID)
@@ -1298,6 +1343,55 @@ func (s *testCommitterSuite) TestAsyncCommit() {
 		string(pk): string(pkVal),
 		string(k1): string(k1Val),
 	})
+}
+
+func (s *testCommitterSuite) TestRetryPushTTL() {
+	ctx := context.Background()
+	k := []byte("a")
+
+	txn1 := s.begin()
+	txn1.SetPessimistic(true)
+	// txn1 lock k
+	lockCtx := &kv.LockCtx{ForUpdateTS: txn1.StartTS(), WaitStartTime: time.Now()}
+	err := txn1.LockKeys(ctx, lockCtx, k)
+	s.Nil(err)
+	txn2 := s.begin()
+	txn2.SetPessimistic(true)
+	txn2GotLock := make(chan struct{})
+	txn3GotLock := make(chan struct{})
+	go func() {
+		// txn2 tries to lock k, will blocked by txn1
+		lockCtx := &kv.LockCtx{ForUpdateTS: txn2.StartTS(), WaitStartTime: time.Now()}
+		// after txn1 rolled back, txn2 should acquire its lock successfully
+		// with the **latest** ttl
+		err := txn2.LockKeys(ctx, lockCtx, k)
+		s.Nil(err)
+		txn2GotLock <- struct{}{}
+	}()
+	time.Sleep(time.Second * 2)
+	txn1.Rollback()
+	<-txn2GotLock
+	txn3 := s.begin()
+	txn3.SetPessimistic(true)
+	lockCtx = &kv.LockCtx{ForUpdateTS: txn3.StartTS(), WaitStartTime: time.Now()}
+	done := make(chan struct{})
+	go func() {
+		// if txn2 use the old ttl calculation method, here txn3 can resolve its lock and
+		// get lock successfully here, which is not expected behavior
+		txn3.LockKeys(ctx, lockCtx, k)
+		txn3GotLock <- struct{}{}
+		txn3.Rollback()
+		done <- struct{}{}
+	}()
+	select {
+	case <-txn3GotLock:
+		s.Fail("txn3 should not get lock at this time")
+	case <-time.After(time.Second * 2):
+		break
+	}
+	txn2.Rollback()
+	<-txn3GotLock
+	<-done
 }
 
 func updateGlobalConfig(f func(conf *config.Config)) {
@@ -1597,4 +1691,57 @@ func (s *testCommitterSuite) TestNewlyInsertedMemDBFlag() {
 
 	err = txn.Commit(ctx)
 	s.Nil(err)
+}
+
+func (s *testCommitterSuite) TestFlagsInMemBufferMutations() {
+	// Get a MemDB object from a transaction object.
+	db := s.begin().GetMemBuffer()
+
+	// A helper for iterating all cases.
+	forEachCase := func(f func(op kvrpcpb.Op, key []byte, value []byte, index int, isPessimisticLock, assertExist, assertNotExist bool)) {
+		keyIndex := 0
+		for _, op := range []kvrpcpb.Op{kvrpcpb.Op_Put, kvrpcpb.Op_Del, kvrpcpb.Op_CheckNotExists} {
+			for flags := 0; flags < (1 << 3); flags++ {
+				key := []byte(fmt.Sprintf("k%05d", keyIndex))
+				value := []byte(fmt.Sprintf("v%05d", keyIndex))
+
+				// `flag` Iterates all combinations of flags in binary.
+				isPessimisticLock := (flags & 0x4) != 0
+				assertExist := (flags & 0x2) != 0
+				assertNotExist := (flags & 0x1) != 0
+
+				f(op, key, value, keyIndex, isPessimisticLock, assertExist, assertNotExist)
+				keyIndex++
+			}
+		}
+	}
+
+	// Put some keys to the MemDB
+	forEachCase(func(op kvrpcpb.Op, key []byte, value []byte, i int, isPessimisticLock, assertExist, assertNotExist bool) {
+		if op == kvrpcpb.Op_Put {
+			err := db.Set(key, value)
+			s.Nil(err)
+		} else if op == kvrpcpb.Op_Del {
+			err := db.Delete(key)
+			s.Nil(err)
+		} else {
+			db.UpdateFlags(key, kv.SetPresumeKeyNotExists)
+		}
+	})
+
+	// Create memBufferMutations object and add keys with flags to it.
+	mutations := transaction.NewMemBufferMutationsProbe(db.Len(), db)
+
+	forEachCase(func(op kvrpcpb.Op, key []byte, value []byte, i int, isPessimisticLock, assertExist, assertNotExist bool) {
+		handle := db.IterWithFlags(key, nil).Handle()
+		mutations.Push(op, isPessimisticLock, assertExist, assertNotExist, handle)
+	})
+
+	forEachCase(func(op kvrpcpb.Op, key []byte, value []byte, i int, isPessimisticLock, assertExist, assertNotExist bool) {
+		s.Equal(key, mutations.GetKey(i))
+		s.Equal(op, mutations.GetOp(i))
+		s.Equal(isPessimisticLock, mutations.IsPessimisticLock(i))
+		s.Equal(assertExist, mutations.IsAssertExists(i))
+		s.Equal(assertNotExist, mutations.IsAssertNotExist(i))
+	})
 }

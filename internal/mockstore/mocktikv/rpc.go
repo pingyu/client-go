@@ -119,6 +119,17 @@ func convertToKeyError(err error) *kvrpcpb.KeyError {
 			TxnNotFound: &tmp.TxnNotFound,
 		}
 	}
+	if assertFailed, ok := errors.Cause(err).(*ErrAssertionFailed); ok {
+		return &kvrpcpb.KeyError{
+			AssertionFailed: &kvrpcpb.AssertionFailed{
+				StartTs:          assertFailed.StartTS,
+				Key:              assertFailed.Key,
+				Assertion:        assertFailed.Assertion,
+				ExistingStartTs:  assertFailed.ExistingStartTS,
+				ExistingCommitTs: assertFailed.ExistingCommitTS,
+			},
+		}
+	}
 	return &kvrpcpb.KeyError{
 		Abort: err.Error(),
 	}
@@ -217,6 +228,15 @@ func (h kvHandler) handleKvPrewrite(req *kvrpcpb.PrewriteRequest) *kvrpcpb.Prewr
 		}
 	}
 	errs := h.mvccStore.Prewrite(req)
+	for i, e := range errs {
+		if e != nil {
+			if _, isLocked := errors.Cause(e).(*ErrLocked); !isLocked {
+				// Keep only one error if it's not a KeyIsLocked error.
+				errs = errs[i : i+1]
+				break
+			}
+		}
+	}
 	return &kvrpcpb.PrewriteResponse{
 		Errors: convertToKeyErrors(errs),
 	}
@@ -420,7 +440,7 @@ func (h kvHandler) handleKvRawGet(req *kvrpcpb.RawGetRequest) *kvrpcpb.RawGetRes
 		}
 	}
 	return &kvrpcpb.RawGetResponse{
-		Value: rawKV.RawGet(req.GetKey()),
+		Value: rawKV.RawGet(req.Cf, req.GetKey()),
 	}
 }
 
@@ -434,7 +454,7 @@ func (h kvHandler) handleKvRawBatchGet(req *kvrpcpb.RawBatchGetRequest) *kvrpcpb
 			},
 		}
 	}
-	values := rawKV.RawBatchGet(req.Keys)
+	values := rawKV.RawBatchGet(req.Cf, req.Keys)
 	kvPairs := make([]*kvrpcpb.KvPair, len(values))
 	for i, key := range req.Keys {
 		kvPairs[i] = &kvrpcpb.KvPair{
@@ -454,7 +474,7 @@ func (h kvHandler) handleKvRawPut(req *kvrpcpb.RawPutRequest) *kvrpcpb.RawPutRes
 			Error: "not implemented",
 		}
 	}
-	rawKV.RawPut(req.GetKey(), req.GetValue())
+	rawKV.RawPut(req.GetCf(), req.GetKey(), req.GetValue())
 	return &kvrpcpb.RawPutResponse{}
 }
 
@@ -471,7 +491,7 @@ func (h kvHandler) handleKvRawBatchPut(req *kvrpcpb.RawBatchPutRequest) *kvrpcpb
 		keys = append(keys, pair.Key)
 		values = append(values, pair.Value)
 	}
-	rawKV.RawBatchPut(keys, values)
+	rawKV.RawBatchPut(req.GetCf(), keys, values)
 	return &kvrpcpb.RawBatchPutResponse{}
 }
 
@@ -482,8 +502,35 @@ func (h kvHandler) handleKvRawDelete(req *kvrpcpb.RawDeleteRequest) *kvrpcpb.Raw
 			Error: "not implemented",
 		}
 	}
-	rawKV.RawDelete(req.GetKey())
+	rawKV.RawDelete(req.GetCf(), req.GetKey())
 	return &kvrpcpb.RawDeleteResponse{}
+}
+
+func (h kvHandler) HandleKvRawCompareAndSwap(req *kvrpcpb.RawCASRequest) *kvrpcpb.RawCASResponse {
+	rawKV, ok := h.mvccStore.(RawKV)
+	if !ok {
+		return &kvrpcpb.RawCASResponse{
+			Error: "not implemented",
+		}
+	}
+
+	oldValue, success, err := rawKV.RawCompareAndSwap(
+		req.Cf,
+		req.GetKey(),
+		req.GetPreviousValue(),
+		req.GetValue(),
+	)
+	if err != nil {
+		return &kvrpcpb.RawCASResponse{
+			Error: err.Error(),
+		}
+	}
+
+	return &kvrpcpb.RawCASResponse{
+		Succeed:          success,
+		PreviousNotExist: oldValue == nil,
+		PreviousValue:    oldValue,
+	}
 }
 
 func (h kvHandler) handleKvRawBatchDelete(req *kvrpcpb.RawBatchDeleteRequest) *kvrpcpb.RawBatchDeleteResponse {
@@ -493,7 +540,7 @@ func (h kvHandler) handleKvRawBatchDelete(req *kvrpcpb.RawBatchDeleteRequest) *k
 			Error: "not implemented",
 		}
 	}
-	rawKV.RawBatchDelete(req.Keys)
+	rawKV.RawBatchDelete(req.GetCf(), req.Keys)
 	return &kvrpcpb.RawBatchDeleteResponse{}
 }
 
@@ -504,7 +551,7 @@ func (h kvHandler) handleKvRawDeleteRange(req *kvrpcpb.RawDeleteRangeRequest) *k
 			Error: "not implemented",
 		}
 	}
-	rawKV.RawDeleteRange(req.GetStartKey(), req.GetEndKey())
+	rawKV.RawDeleteRange(req.GetCf(), req.GetStartKey(), req.GetEndKey())
 	return &kvrpcpb.RawDeleteRangeResponse{}
 }
 
@@ -526,6 +573,7 @@ func (h kvHandler) handleKvRawScan(req *kvrpcpb.RawScanRequest) *kvrpcpb.RawScan
 			lowerBound = req.EndKey
 		}
 		pairs = rawKV.RawReverseScan(
+			req.GetCf(),
 			req.StartKey,
 			lowerBound,
 			int(req.GetLimit()),
@@ -536,6 +584,7 @@ func (h kvHandler) handleKvRawScan(req *kvrpcpb.RawScanRequest) *kvrpcpb.RawScan
 			upperBound = req.EndKey
 		}
 		pairs = rawKV.RawScan(
+			req.GetCf(),
 			req.StartKey,
 			upperBound,
 			int(req.GetLimit()),
@@ -552,7 +601,7 @@ func (h kvHandler) handleSplitRegion(req *kvrpcpb.SplitRegionRequest) *kvrpcpb.S
 	resp := &kvrpcpb.SplitRegionResponse{Regions: make([]*metapb.Region, 0, len(keys)+1)}
 	for i, key := range keys {
 		k := NewMvccKey(key)
-		region, _ := h.cluster.GetRegionByKey(k)
+		region, _, _ := h.cluster.GetRegionByKey(k)
 		if bytes.Equal(region.GetStartKey(), key) {
 			continue
 		}
@@ -877,6 +926,13 @@ func (c *RPCClient) SendRequest(ctx context.Context, addr string, req *tikvrpc.R
 			return resp, nil
 		}
 		resp.Resp = kvHandler{session}.handleKvRawScan(r)
+	case tikvrpc.CmdRawCompareAndSwap:
+		r := req.RawCompareAndSwap()
+		if err := session.checkRequest(reqCtx, r.Size()); err != nil {
+			resp.Resp = &kvrpcpb.RawCASResponse{RegionError: err}
+			return resp, nil
+		}
+		resp.Resp = kvHandler{session}.HandleKvRawCompareAndSwap(r)
 	case tikvrpc.CmdUnsafeDestroyRange:
 		panic("unimplemented")
 	case tikvrpc.CmdRegisterLockObserver:

@@ -91,6 +91,7 @@ var (
 	TiKVSmallReadDuration                    prometheus.Histogram
 	TiKVReadThroughput                       prometheus.Histogram
 	TiKVUnsafeDestroyRangeFailuresCounterVec *prometheus.CounterVec
+	TiKVPrewriteAssertionUsageCounter        *prometheus.CounterVec
 )
 
 // Label constants.
@@ -300,7 +301,7 @@ func initMetrics(namespace, subsystem string) {
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "batch_pending_requests",
-			Buckets:   prometheus.ExponentialBuckets(1, 2, 8),
+			Buckets:   prometheus.ExponentialBuckets(1, 2, 11), // 1 ~ 1024
 			Help:      "number of requests pending in the batch channel",
 		}, []string{"store"})
 
@@ -309,7 +310,7 @@ func initMetrics(namespace, subsystem string) {
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "batch_requests",
-			Buckets:   prometheus.ExponentialBuckets(1, 2, 8),
+			Buckets:   prometheus.ExponentialBuckets(1, 2, 11), // 1 ~ 1024
 			Help:      "number of requests in one batch",
 		}, []string{"store"})
 
@@ -541,6 +542,14 @@ func initMetrics(namespace, subsystem string) {
 			Help:      "Counter of unsafe destroyrange failures",
 		}, []string{LblType})
 
+	TiKVPrewriteAssertionUsageCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "prewrite_assertion_count",
+			Help:      "Counter of assertions used in prewrite requests",
+		}, []string{LblType})
+
 	initShortcuts()
 }
 
@@ -605,6 +614,8 @@ func RegisterMetrics() {
 	prometheus.MustRegister(TiKVTxnCommitBackoffCount)
 	prometheus.MustRegister(TiKVSmallReadDuration)
 	prometheus.MustRegister(TiKVReadThroughput)
+	prometheus.MustRegister(TiKVUnsafeDestroyRangeFailuresCounterVec)
+	prometheus.MustRegister(TiKVPrewriteAssertionUsageCounter)
 }
 
 // readCounter reads the value of a prometheus.Counter.

@@ -59,6 +59,7 @@ import (
 	tikv "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/metrics"
 	"github.com/tikv/client-go/v2/tikvrpc"
+	"github.com/tikv/client-go/v2/tikvrpc/interceptor"
 	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
 	"github.com/tikv/client-go/v2/txnkv/txnutil"
 	"github.com/tikv/client-go/v2/util"
@@ -99,19 +100,23 @@ type KVTxn struct {
 	// commitCallback is called after current transaction gets committed
 	commitCallback func(info string, err error)
 
-	binlog              BinlogExecutor
-	schemaLeaseChecker  SchemaLeaseChecker
-	syncLog             bool
-	priority            txnutil.Priority
-	isPessimistic       bool
-	enableAsyncCommit   bool
-	enable1PC           bool
-	causalConsistency   bool
-	scope               string
-	kvFilter            KVFilter
-	resourceGroupTag    []byte
-	resourceGroupTagger tikvrpc.ResourceGroupTagger // use this when resourceGroupTag is nil
-	diskFullOpt         kvrpcpb.DiskFullOpt
+	binlog                  BinlogExecutor
+	schemaLeaseChecker      SchemaLeaseChecker
+	syncLog                 bool
+	priority                txnutil.Priority
+	isPessimistic           bool
+	enableAsyncCommit       bool
+	enable1PC               bool
+	causalConsistency       bool
+	scope                   string
+	kvFilter                KVFilter
+	resourceGroupTag        []byte
+	resourceGroupTagger     tikvrpc.ResourceGroupTagger // use this when resourceGroupTag is nil
+	diskFullOpt             kvrpcpb.DiskFullOpt
+	commitTSUpperBoundCheck func(uint64) bool
+	// interceptor is used to decorate the RPC request logic related to the txn.
+	interceptor    interceptor.RPCInterceptor
+	assertionLevel kvrpcpb.AssertionLevel
 }
 
 // NewTiKVTxn creates a new KVTxn.
@@ -242,6 +247,24 @@ func (txn *KVTxn) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger) {
 	txn.GetSnapshot().SetResourceGroupTagger(tagger)
 }
 
+// SetRPCInterceptor sets interceptor.RPCInterceptor for the transaction and its related snapshot.
+// interceptor.RPCInterceptor will be executed before each RPC request is initiated.
+// Note that SetRPCInterceptor will replace the previously set interceptor.
+func (txn *KVTxn) SetRPCInterceptor(it interceptor.RPCInterceptor) {
+	txn.interceptor = it
+	txn.GetSnapshot().SetRPCInterceptor(it)
+}
+
+// AddRPCInterceptor adds an interceptor, the order of addition is the order of execution.
+func (txn *KVTxn) AddRPCInterceptor(it interceptor.RPCInterceptor) {
+	if txn.interceptor == nil {
+		txn.SetRPCInterceptor(it)
+		return
+	}
+	txn.interceptor = interceptor.ChainRPCInterceptors(txn.interceptor, it)
+	txn.GetSnapshot().AddRPCInterceptor(it)
+}
+
 // SetSchemaAmender sets an amender to update mutations after schema change.
 func (txn *KVTxn) SetSchemaAmender(sa SchemaAmender) {
 	txn.schemaAmender = sa
@@ -281,6 +304,13 @@ func (txn *KVTxn) SetKVFilter(filter KVFilter) {
 	txn.kvFilter = filter
 }
 
+// SetCommitTSUpperBoundCheck provide a way to restrict the commit TS upper bound.
+// The 2PC processing will pass the commitTS for the checker function, if the function
+// returns false, the 2PC processing will abort.
+func (txn *KVTxn) SetCommitTSUpperBoundCheck(f func(commitTS uint64) bool) {
+	txn.commitTSUpperBoundCheck = f
+}
+
 // SetDiskFullOpt sets whether current operation is allowed in each TiKV disk usage level.
 func (txn *KVTxn) SetDiskFullOpt(level kvrpcpb.DiskFullOpt) {
 	txn.diskFullOpt = level
@@ -294,6 +324,11 @@ func (txn *KVTxn) GetDiskFullOpt() kvrpcpb.DiskFullOpt {
 // ClearDiskFullOpt clears the options of current operation in each tikv disk usage level.
 func (txn *KVTxn) ClearDiskFullOpt() {
 	txn.diskFullOpt = kvrpcpb.DiskFullOpt_NotAllowedOnFull
+}
+
+// SetAssertionLevel sets how strict the assertions in the transaction should be.
+func (txn *KVTxn) SetAssertionLevel(assertionLevel kvrpcpb.AssertionLevel) {
+	txn.assertionLevel = assertionLevel
 }
 
 // IsPessimistic returns true if it is pessimistic.
@@ -343,6 +378,13 @@ func (txn *KVTxn) Commit(ctx context.Context) error {
 		sessionID = val.(uint64)
 	}
 
+	if txn.interceptor != nil {
+		// User has called txn.SetRPCInterceptor() to explicitly set an interceptor, we
+		// need to bind it to ctx so that the internal client can perceive and execute
+		// it before initiating an RPC request.
+		ctx = interceptor.WithRPCInterceptor(ctx, txn.interceptor)
+	}
+
 	var err error
 	// If the txn use pessimistic lock, committer is initialized.
 	committer := txn.committer
@@ -359,9 +401,12 @@ func (txn *KVTxn) Commit(ctx context.Context) error {
 	defer committer.ttlManager.close()
 
 	initRegion := trace.StartRegion(ctx, "InitKeys")
-	err = committer.initKeysAndMutations()
+	err = committer.initKeysAndMutations(ctx)
 	initRegion.End()
 	if err != nil {
+		if txn.IsPessimistic() {
+			txn.asyncPessimisticRollback(ctx, committer.mutations.GetKeys())
+		}
 		return err
 	}
 	if committer.mutations.Len() == 0 {
@@ -450,6 +495,12 @@ func (txn *KVTxn) rollbackPessimisticLocks() error {
 		return nil
 	}
 	bo := retry.NewBackofferWithVars(context.Background(), cleanupMaxBackoff, txn.vars)
+	if txn.interceptor != nil {
+		// User has called txn.SetRPCInterceptor() to explicitly set an interceptor, we
+		// need to bind it to ctx so that the internal client can perceive and execute
+		// it before initiating an RPC request.
+		bo.SetCtx(interceptor.WithRPCInterceptor(bo.GetCtx(), txn.interceptor))
+	}
 	keys := txn.collectLockedKeys()
 	return txn.committer.pessimisticRollbackMutations(bo, &PlainMutations{keys: keys})
 }
@@ -526,6 +577,12 @@ func (txn *KVTxn) LockKeysWithWaitTime(ctx context.Context, lockWaitTime int64, 
 // LockKeys tries to lock the entries with the keys in KV store.
 // lockCtx is the context for lock, lockCtx.lockWaitTime in ms
 func (txn *KVTxn) LockKeys(ctx context.Context, lockCtx *tikv.LockCtx, keysInput ...[]byte) error {
+	if txn.interceptor != nil {
+		// User has called txn.SetRPCInterceptor() to explicitly set an interceptor, we
+		// need to bind it to ctx so that the internal client can perceive and execute
+		// it before initiating an RPC request.
+		ctx = interceptor.WithRPCInterceptor(ctx, txn.interceptor)
+	}
 	// Exclude keys that are already locked.
 	var err error
 	keys := make([][]byte, 0, len(keysInput))
@@ -583,6 +640,7 @@ func (txn *KVTxn) LockKeys(ctx context.Context, lockCtx *tikv.LockCtx, keysInput
 		return nil
 	}
 	keys = deduplicateKeys(keys)
+	checkedExistence := false
 	if txn.IsPessimistic() && lockCtx.ForUpdateTS > 0 {
 		if txn.committer == nil {
 			// sessionID is used for log.
@@ -666,15 +724,23 @@ func (txn *KVTxn) LockKeys(ctx context.Context, lockCtx *tikv.LockCtx, keysInput
 			}
 			return err
 		}
+
+		if lockCtx.CheckExistence {
+			checkedExistence = true
+		}
 	}
 	for _, key := range keys {
 		valExists := tikv.SetKeyLockedValueExists
 		// PointGet and BatchPointGet will return value in pessimistic lock response, the value may not exist.
 		// For other lock modes, the locked key values always exist.
-		if lockCtx.ReturnValues {
-			val := lockCtx.Values[string(key)]
-			if len(val.Value) == 0 {
-				valExists = tikv.SetKeyLockedValueNotExists
+		if lockCtx.ReturnValues || checkedExistence {
+			// If ReturnValue is disabled and CheckExistence is requested, it's still possible that the TiKV's version
+			// is too old and CheckExistence is not supported.
+			if val, ok := lockCtx.Values[string(key)]; ok {
+				// TODO: Check if it's safe to use `val.Exists` instead of assuming empty value.
+				if !val.Exists {
+					valExists = tikv.SetKeyLockedValueNotExists
+				}
 			}
 		}
 		memBuf.UpdateFlags(key, tikv.SetKeyLocked, tikv.DelNeedCheckExists, valExists)

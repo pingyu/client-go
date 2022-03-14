@@ -41,7 +41,6 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/pingcap/tidb/store/mockstore/mockcopr"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/suite"
 	"github.com/tikv/client-go/v2/testutils"
@@ -62,7 +61,7 @@ type testSplitSuite struct {
 }
 
 func (s *testSplitSuite) SetupTest() {
-	client, cluster, pdClient, err := testutils.NewMockTiKV("", mockcopr.NewCoprRPCHandler())
+	client, cluster, pdClient, err := testutils.NewMockTiKV("", nil)
 	s.Require().Nil(err)
 	testutils.BootstrapWithSingleStore(cluster)
 	s.cluster = cluster
@@ -141,6 +140,18 @@ type mockPDClient struct {
 	stop   bool
 }
 
+func (c *mockPDClient) LoadGlobalConfig(ctx context.Context, names []string) ([]pd.GlobalConfigItem, error) {
+	return nil, nil
+}
+
+func (c *mockPDClient) StoreGlobalConfig(ctx context.Context, items []pd.GlobalConfigItem) error {
+	return nil
+}
+
+func (c *mockPDClient) WatchGlobalConfig(ctx context.Context) (chan []pd.GlobalConfigItem, error) {
+	return nil, nil
+}
+
 func (c *mockPDClient) disable() {
 	c.Lock()
 	defer c.Unlock()
@@ -177,38 +188,38 @@ func (c *mockPDClient) GetLocalTSAsync(ctx context.Context, dcLocation string) p
 	return nil
 }
 
-func (c *mockPDClient) GetRegion(ctx context.Context, key []byte) (*pd.Region, error) {
+func (c *mockPDClient) GetRegion(ctx context.Context, key []byte, opts ...pd.GetRegionOption) (*pd.Region, error) {
 	c.RLock()
 	defer c.RUnlock()
 
 	if c.stop {
 		return nil, errors.WithStack(errStopped)
 	}
-	return c.client.GetRegion(ctx, key)
+	return c.client.GetRegion(ctx, key, opts...)
 }
 
 func (c *mockPDClient) GetRegionFromMember(ctx context.Context, key []byte, memberURLs []string) (*pd.Region, error) {
 	return nil, nil
 }
 
-func (c *mockPDClient) GetPrevRegion(ctx context.Context, key []byte) (*pd.Region, error) {
+func (c *mockPDClient) GetPrevRegion(ctx context.Context, key []byte, opts ...pd.GetRegionOption) (*pd.Region, error) {
 	c.RLock()
 	defer c.RUnlock()
 
 	if c.stop {
 		return nil, errors.WithStack(errStopped)
 	}
-	return c.client.GetPrevRegion(ctx, key)
+	return c.client.GetPrevRegion(ctx, key, opts...)
 }
 
-func (c *mockPDClient) GetRegionByID(ctx context.Context, regionID uint64) (*pd.Region, error) {
+func (c *mockPDClient) GetRegionByID(ctx context.Context, regionID uint64, opts ...pd.GetRegionOption) (*pd.Region, error) {
 	c.RLock()
 	defer c.RUnlock()
 
 	if c.stop {
 		return nil, errors.WithStack(errStopped)
 	}
-	return c.client.GetRegionByID(ctx, regionID)
+	return c.client.GetRegionByID(ctx, regionID, opts...)
 }
 
 func (c *mockPDClient) ScanRegions(ctx context.Context, startKey []byte, endKey []byte, limit int) ([]*pd.Region, error) {
