@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -79,5 +80,19 @@ func main() {
 			panic(err)
 		}
 		fmt.Printf("key: %s deleted\n", key)
+	} else if oper == "scan" {
+		endKey := []byte(os.Args[4])
+		limit, err := strconv.Atoi(os.Args[5])
+		if err != nil {
+			panic(err)
+		}
+		keys, values, err := cli.Scan(context.TODO(), key, endKey, limit)
+		if err != nil {
+			panic(err)
+		}
+		for i := range keys {
+			fmt.Printf("(%v, %v), ", hex.EncodeToString(keys[i]), hex.EncodeToString(values[i]))
+		}
+		fmt.Println("")
 	}
 }

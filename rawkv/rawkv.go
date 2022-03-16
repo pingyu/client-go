@@ -459,6 +459,18 @@ func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, o
 		return nil, nil, errors.WithStack(ErrMaxScanLimitExceeded)
 	}
 
+	rctx := kvrpcpb.Context{
+		ApiVersion: c.apiVersion,
+	}
+	if c.apiVersion == kvrpcpb.APIVersion_V2 {
+		startKey = append([]byte{'r'}, startKey...)
+		if len(endKey) != 0 {
+			endKey = append([]byte{'r'}, endKey...)
+		} else {
+			endKey = []byte{'r' + 1}
+		}
+	}
+
 	opts := c.getRawKVOptions(options...)
 
 	for len(keys) < limit && (len(endKey) == 0 || bytes.Compare(startKey, endKey) < 0) {
@@ -468,7 +480,7 @@ func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, o
 			Limit:    uint32(limit - len(keys)),
 			KeyOnly:  opts.KeyOnly,
 			Cf:       c.getColumnFamily(opts),
-		})
+		}, rctx)
 		resp, loc, err := c.sendReq(ctx, startKey, req, false)
 		if err != nil {
 			return nil, nil, err
