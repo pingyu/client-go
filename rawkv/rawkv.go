@@ -48,7 +48,6 @@ import (
 	"github.com/tikv/client-go/v2/internal/locate"
 	"github.com/tikv/client-go/v2/internal/retry"
 	"github.com/tikv/client-go/v2/metrics"
-	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	pd "github.com/tikv/pd/client"
 )
@@ -151,9 +150,12 @@ func NewClient(ctx context.Context, pdAddrs []string, security config.Security, 
 	}, nil
 }
 
-func NewClientV2(ctx context.Context, pdAddrs []string) (*Client, error) {
-	cfg := config.GetGlobalConfig()
-	pdCli, err := tikv.NewPDClient(pdAddrs)
+func NewClientV2(ctx context.Context, pdAddrs []string, security config.Security, opts ...pd.ClientOption) (*Client, error) {
+	pdCli, err := pd.NewClient(pdAddrs, pd.SecurityOption{
+		CAPath:   security.ClusterSSLCA,
+		CertPath: security.ClusterSSLCert,
+		KeyPath:  security.ClusterSSLKey,
+	}, opts...)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -161,7 +163,7 @@ func NewClientV2(ctx context.Context, pdAddrs []string) (*Client, error) {
 		clusterID:   pdCli.GetClusterID(ctx),
 		regionCache: locate.NewRegionCache(pdCli),
 		pdClient:    pdCli,
-		rpcClient:   client.NewRPCClient(client.WithSecurity(cfg.Security)),
+		rpcClient:   client.NewRPCClient(client.WithSecurity(security)),
 		apiVersion:  kvrpcpb.APIVersion_V2,
 	}, nil
 }
