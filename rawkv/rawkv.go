@@ -369,12 +369,19 @@ func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) e
 	start := time.Now()
 	defer func() { metrics.RawkvCmdHistogramWithDelete.Observe(time.Since(start).Seconds()) }()
 
+	rctx := kvrpcpb.Context{
+		ApiVersion: c.apiVersion,
+	}
+	if c.apiVersion == kvrpcpb.APIVersion_V2 {
+		key = append([]byte{'r'}, key...)
+	}
+
 	opts := c.getRawKVOptions(options...)
 	req := tikvrpc.NewRequest(tikvrpc.CmdRawDelete, &kvrpcpb.RawDeleteRequest{
 		Key:    key,
 		Cf:     c.getColumnFamily(opts),
 		ForCas: c.atomic,
-	})
+	}, rctx)
 	req.MaxExecutionDurationMs = uint64(client.MaxWriteExecutionTime.Milliseconds())
 	resp, _, err := c.sendReq(ctx, key, req, false)
 	if err != nil {
