@@ -432,6 +432,15 @@ func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte
 		metrics.TiKVRawkvCmdHistogram.WithLabelValues(label).Observe(time.Since(start).Seconds())
 	}()
 
+	if c.apiVersion == kvrpcpb.APIVersion_V2 {
+		startKey = append([]byte{'r'}, startKey...)
+		if len(endKey) != 0 {
+			endKey = append([]byte{'r'}, endKey...)
+		} else {
+			endKey = []byte{'r' + 1}
+		}
+	}
+
 	// Process each affected region respectively
 	for !bytes.Equal(startKey, endKey) {
 		opts := c.getRawKVOptions(options...)
@@ -769,11 +778,15 @@ func (c *Client) sendDeleteRangeReq(ctx context.Context, startKey []byte, endKey
 			actualEndKey = loc.EndKey
 		}
 
+		rctx := kvrpcpb.Context{
+			ApiVersion: c.apiVersion,
+		}
+
 		req := tikvrpc.NewRequest(tikvrpc.CmdRawDeleteRange, &kvrpcpb.RawDeleteRangeRequest{
 			StartKey: startKey,
 			EndKey:   actualEndKey,
 			Cf:       c.getColumnFamily(opts),
-		})
+		}, rctx)
 
 		req.MaxExecutionDurationMs = uint64(client.MaxWriteExecutionTime.Milliseconds())
 		resp, err := sender.SendReq(bo, req, loc.Region, client.ReadTimeoutShort)

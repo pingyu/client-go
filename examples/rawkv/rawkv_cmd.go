@@ -95,5 +95,12 @@ func main() {
 			fmt.Printf("(%v, %v), ", hex.EncodeToString(keys[i]), hex.EncodeToString(values[i]))
 		}
 		fmt.Println("")
+	} else if oper == "del-range" {
+		endKey := []byte(os.Args[4])
+		err := cli.DeleteRange(context.TODO(), key, endKey)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println("success")
 	}
 }
