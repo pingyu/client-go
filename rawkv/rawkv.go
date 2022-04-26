@@ -489,6 +489,12 @@ func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, o
 			endKey = []byte{'r' + 1}
 		}
 	}
+	decodeKey := func(key []byte) []byte {
+		if c.apiVersion == kvrpcpb.APIVersion_V2 {
+			return key[1:]
+		}
+		return key
+	}
 
 	opts := c.getRawKVOptions(options...)
 
@@ -509,7 +515,7 @@ func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, o
 		}
 		cmdResp := resp.Resp.(*kvrpcpb.RawScanResponse)
 		for _, pair := range cmdResp.Kvs {
-			keys = append(keys, pair.Key)
+			keys = append(keys, decodeKey(pair.Key))
 			values = append(values, pair.Value)
 		}
 		startKey = loc.EndKey
