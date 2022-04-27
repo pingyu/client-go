@@ -19,7 +19,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
+	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/tikv/client-go/v2/oracle"
+	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv"
 )
 
@@ -75,6 +79,40 @@ func get(k []byte) (KV, error) {
 	return KV{K: k, V: v}, nil
 }
 
+// Test method
+// 1: Start cluster: tiup playground nightly --mode tikv-slim --pd 1 --kv 3
+// 2: Connect to PD: tiup ctl:nightly pd -i -u <PD ADDR>
+// 3: Set labels:
+//    store label 1 zone idc1
+//    store label 2 zone idc2
+//    store label 3 zone idc3
+// 4: If leader is on store 1, transfer to store 2 or store 3.
+//    Check leader position: using "region" command.
+//    Transfer leader: using "operator add transfer-leader <region-id> <store-id>"
+// 5: Run "txnkv"
+// 6: "kv_get" metric (TiKV-Summary, gRPC panel) of store 1 in Grafana should be more than zero.
+func stale_get(k []byte, prevSecond uint64, label string) (KV, error) {
+	startTS, err := client.GetOracle().GetStaleTimestamp(context.TODO(), oracle.GlobalTxnScope, prevSecond)
+	if err != nil {
+		return KV{}, err
+	}
+
+	tx, err := client.Begin(tikv.WithStartTS(startTS))
+	if err != nil {
+		return KV{}, err
+	}
+
+	snapshot := tx.GetSnapshot()
+	snapshot.SetIsStatenessReadOnly(true)
+	snapshot.SetMatchStoreLabels([]*metapb.StoreLabel{{Key: tikv.DCLabelKey, Value: label}})
+
+	v, err := tx.Get(context.TODO(), k)
+	if err != nil {
+		return KV{}, err
+	}
+	return KV{K: k, V: v}, nil
+}
+
 func dels(keys ...[]byte) error {
 	tx, err := client.Begin()
 	if err != nil {
@@ -116,8 +154,10 @@ func main() {
 	flag.Parse()
 	initStore()
 
+	value := []byte(fmt.Sprintf("%v", time.Now()))
+
 	// set
-	err := puts([]byte("key1"), []byte("value1"), []byte("key2"), []byte("value2"))
+	err := puts([]byte("key1"), value, []byte("key2"), []byte("value2"))
 	if err != nil {
 		panic(err)
 	}
@@ -127,7 +167,14 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(kv)
+	fmt.Printf("get latest: %v\n", kv)
+
+	// stale get
+	kv, err = stale_get([]byte("key1"), 2, "idc1")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("get stale: %v\n", kv)
 
 	// scan
 	ret, err := scan([]byte("key"), 10)
@@ -139,8 +186,8 @@ func main() {
 	}
 
 	// delete
-	err = dels([]byte("key1"), []byte("key2"))
-	if err != nil {
-		panic(err)
-	}
+	// err = dels([]byte("key1"), []byte("key2"))
+	// if err != nil {
+	// 	panic(err)
+	// }
 }
