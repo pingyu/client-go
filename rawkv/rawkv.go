@@ -48,6 +48,7 @@ import (
 	"github.com/tikv/client-go/v2/internal/locate"
 	"github.com/tikv/client-go/v2/internal/retry"
 	"github.com/tikv/client-go/v2/metrics"
+	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	pd "github.com/tikv/pd/client"
 )
@@ -151,11 +152,7 @@ func NewClient(ctx context.Context, pdAddrs []string, security config.Security, 
 }
 
 func NewClientV2(ctx context.Context, pdAddrs []string, security config.Security, opts ...pd.ClientOption) (*Client, error) {
-	pdCli, err := pd.NewClient(pdAddrs, pd.SecurityOption{
-		CAPath:   security.ClusterSSLCA,
-		CertPath: security.ClusterSSLCert,
-		KeyPath:  security.ClusterSSLKey,
-	}, opts...)
+	pdCli, err := tikv.NewPDClient(pdAddrs) // TODO: NewPDClient with security
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
