@@ -52,6 +52,7 @@ import (
 	"github.com/tikv/client-go/v2/internal/logutil"
 	"github.com/tikv/client-go/v2/internal/retry"
 	"github.com/tikv/client-go/v2/metrics"
+	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
 	"github.com/tikv/client-go/v2/util"
@@ -107,6 +108,20 @@ func (c *twoPhaseCommitter) buildPrewriteRequest(batch batchMutations, txnSize u
 	}
 
 	ttl := c.lockTTL
+
+	// ref: https://github.com/pingcap/tidb/issues/33641
+	// we make the TTL satisfy the following condition:
+	// 	max_commit_ts.physical < start_ts.physical + TTL < (current_ts of some check_txn_status that wants to resolve this lock).physical
+	// and we have:
+	//  current_ts <= max_ts <= min_commit_ts of this lock
+	// such that
+	// 	max_commit_ts < min_commit_ts, so if this lock is resolved, it will be forced to fall back to normal 2PC, thus resolving the issue.
+	if c.isAsyncCommit() && c.isPessimistic {
+		safeTTL := uint64(oracle.ExtractPhysical(c.maxCommitTS)-oracle.ExtractPhysical(c.startTS)) + 1
+		if safeTTL > ttl {
+			ttl = safeTTL
+		}
+	}
 
 	if c.sessionID > 0 {
 		if _, err := util.EvalFailpoint("twoPCShortLockTTL"); err == nil {
@@ -210,6 +225,7 @@ func (action actionPrewrite) handleSingleBatch(c *twoPhaseCommitter, bo *retry.B
 
 	req := c.buildPrewriteRequest(batch, txnSize)
 	sender := locate.NewRegionRequestSender(c.store.GetRegionCache(), c.store.GetTiKVClient())
+	var resolvingRecordToken *int
 	defer func() {
 		if err != nil {
 			// If we fail to receive response for async commit prewrite, it will be undetermined whether this
@@ -364,6 +380,13 @@ func (action actionPrewrite) handleSingleBatch(c *twoPhaseCommitter, bo *retry.B
 			locks = append(locks, lock)
 		}
 		start := time.Now()
+		if resolvingRecordToken == nil {
+			token := c.store.GetLockResolver().RecordResolvingLocks(locks, c.startTS)
+			resolvingRecordToken = &token
+			defer c.store.GetLockResolver().ResolveLocksDone(c.startTS, *resolvingRecordToken)
+		} else {
+			c.store.GetLockResolver().UpdateResolvingLocks(locks, c.startTS, *resolvingRecordToken)
+		}
 		msBeforeExpired, err := c.store.GetLockResolver().ResolveLocks(bo, c.startTS, locks)
 		if err != nil {
 			return err

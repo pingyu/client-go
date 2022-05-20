@@ -37,6 +37,7 @@ package locate
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -755,8 +756,55 @@ func (l *KeyLocation) GetBucketVersion() uint64 {
 	return l.Buckets.GetVersion()
 }
 
-// LocateBucket returns the bucket the key is located.
+// LocateBucket handles with a type of edge case of locateBucket that returns nil.
+// There are two cases where locateBucket returns nil:
+// Case one is that the key neither does not belong to any bucket nor does not belong to the region.
+// Case two is that the key belongs to the region but not any bucket.
+// LocateBucket will not return nil in the case two.
+// Specifically, when the key is in [KeyLocation.StartKey, first Bucket key), the result returned by locateBucket will be nil
+// as there's no bucket containing this key. LocateBucket will return Bucket{KeyLocation.StartKey, first Bucket key}
+// as it's reasonable to assume that Bucket{KeyLocation.StartKey, first Bucket key} is a bucket belonging to the region.
+// Key in [last Bucket key, KeyLocation.EndKey) is handled similarly.
 func (l *KeyLocation) LocateBucket(key []byte) *Bucket {
+	bucket := l.locateBucket(key)
+	// Return the bucket when locateBucket can locate the key
+	if bucket != nil {
+		return bucket
+	}
+	// Case one returns nil too.
+	if !l.Contains(key) {
+		return nil
+	}
+	counts := len(l.Buckets.Keys)
+	if counts == 0 {
+		return &Bucket{
+			l.StartKey,
+			l.EndKey,
+		}
+	}
+	// Handle case two
+	firstBucketKey := l.Buckets.Keys[0]
+	if bytes.Compare(key, firstBucketKey) < 0 {
+		return &Bucket{
+			l.StartKey,
+			firstBucketKey,
+		}
+	}
+	lastBucketKey := l.Buckets.Keys[counts-1]
+	if bytes.Compare(lastBucketKey, key) <= 0 {
+		return &Bucket{
+			lastBucketKey,
+			l.EndKey,
+		}
+	}
+	// unreachable
+	logutil.Logger(context.Background()).Info(
+		"Unreachable place", zap.String("KeyLocation", l.String()), zap.String("Key", hex.EncodeToString(key)))
+	panic("Unreachable")
+}
+
+// locateBucket returns the bucket the key is located. It returns nil if the key is outside the bucket.
+func (l *KeyLocation) locateBucket(key []byte) *Bucket {
 	keys := l.Buckets.GetKeys()
 	searchLen := len(keys) - 1
 	i := sort.Search(searchLen, func(i int) bool {
@@ -1317,6 +1365,7 @@ func (c *RegionCache) loadRegion(bo *retry.Backoffer, key []byte, isEndKey bool)
 				return nil, errors.WithStack(err)
 			}
 		}
+		start := time.Now()
 		var reg *pd.Region
 		var err error
 		if searchPrev {
@@ -1324,10 +1373,11 @@ func (c *RegionCache) loadRegion(bo *retry.Backoffer, key []byte, isEndKey bool)
 		} else {
 			reg, err = c.pdClient.GetRegion(ctx, key, pd.WithBuckets())
 		}
+		metrics.LoadRegionCacheHistogramWhenCacheMiss.Observe(time.Since(start).Seconds())
 		if err != nil {
-			metrics.RegionCacheCounterWithGetRegionError.Inc()
+			metrics.RegionCacheCounterWithGetCacheMissError.Inc()
 		} else {
-			metrics.RegionCacheCounterWithGetRegionOK.Inc()
+			metrics.RegionCacheCounterWithGetCacheMissOK.Inc()
 		}
 		if err != nil {
 			if isDecodeError(err) {
@@ -1368,7 +1418,9 @@ func (c *RegionCache) loadRegionByID(bo *retry.Backoffer, regionID uint64) (*Reg
 				return nil, errors.WithStack(err)
 			}
 		}
+		start := time.Now()
 		reg, err := c.pdClient.GetRegionByID(ctx, regionID, pd.WithBuckets())
+		metrics.LoadRegionCacheHistogramWithRegionByID.Observe(time.Since(start).Seconds())
 		if err != nil {
 			metrics.RegionCacheCounterWithGetRegionByIDError.Inc()
 		} else {
@@ -1439,7 +1491,9 @@ func (c *RegionCache) scanRegions(bo *retry.Backoffer, startKey, endKey []byte, 
 				return nil, errors.WithStack(err)
 			}
 		}
+		start := time.Now()
 		regionsInfo, err := c.pdClient.ScanRegions(ctx, startKey, endKey, limit)
+		metrics.LoadRegionCacheHistogramWithRegions.Observe(time.Since(start).Seconds())
 		if err != nil {
 			if isDecodeError(err) {
 				return nil, errors.Errorf("failed to decode region range key, startKey: %q, limit: %q, err: %v", util.HexRegionKeyStr(startKey), limit, err)
@@ -2023,7 +2077,9 @@ func (s *Store) initResolve(bo *retry.Backoffer, c *RegionCache) (addr string, e
 	}
 	var store *metapb.Store
 	for {
+		start := time.Now()
 		store, err = c.pdClient.GetStore(bo.GetCtx(), s.storeID)
+		metrics.LoadRegionCacheHistogramWithGetStore.Observe(time.Since(start).Seconds())
 		if err != nil {
 			metrics.RegionCacheCounterWithGetStoreError.Inc()
 		} else {
