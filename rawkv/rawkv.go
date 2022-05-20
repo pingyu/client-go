@@ -118,6 +118,7 @@ type Client struct {
 	cf          string
 	atomic      bool
 	apiVersion  kvrpcpb.APIVersion
+	noPrefix    bool
 }
 
 // SetAtomicForCAS sets atomic mode for CompareAndSwap
@@ -165,6 +166,21 @@ func NewClientV2(ctx context.Context, pdAddrs []string, security config.Security
 	}, nil
 }
 
+func NewClientV2NoPrefix(ctx context.Context, pdAddrs []string, security config.Security, opts ...pd.ClientOption) (*Client, error) {
+	pdCli, err := tikv.NewPDClient(pdAddrs) // TODO: NewPDClient with security
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	return &Client{
+		clusterID:   pdCli.GetClusterID(ctx),
+		regionCache: locate.NewRegionCache(pdCli),
+		pdClient:    pdCli,
+		rpcClient:   client.NewRPCClient(client.WithSecurity(security)),
+		apiVersion:  kvrpcpb.APIVersion_V2,
+		noPrefix:    true,
+	}, nil
+}
+
 // Close closes the client.
 func (c *Client) Close() error {
 	if c.pdClient != nil {
@@ -192,7 +208,7 @@ func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]b
 	rctx := kvrpcpb.Context{
 		ApiVersion: c.apiVersion,
 	}
-	if c.apiVersion == kvrpcpb.APIVersion_V2 {
+	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
 		key = append([]byte{'r'}, key...)
 	}
 
@@ -269,7 +285,7 @@ func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, 
 	rctx := kvrpcpb.Context{
 		ApiVersion: c.apiVersion,
 	}
-	if c.apiVersion == kvrpcpb.APIVersion_V2 {
+	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
 		key = append([]byte{'r'}, key...)
 	}
 
@@ -300,11 +316,15 @@ func (c *Client) GetKeyTTL(ctx context.Context, key []byte, options ...RawOption
 	var ttl uint64
 	metrics.RawkvSizeHistogramWithKey.Observe(float64(len(key)))
 
+	rctx := kvrpcpb.Context{
+		ApiVersion: c.apiVersion,
+	}
+
 	opts := c.getRawKVOptions(options...)
 	req := tikvrpc.NewRequest(tikvrpc.CmdGetKeyTTL, &kvrpcpb.RawGetKeyTTLRequest{
 		Key: key,
 		Cf:  c.getColumnFamily(opts),
-	})
+	}, rctx)
 	resp, _, err := c.sendReq(ctx, key, req, false)
 
 	if err != nil {
@@ -369,7 +389,7 @@ func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) e
 	rctx := kvrpcpb.Context{
 		ApiVersion: c.apiVersion,
 	}
-	if c.apiVersion == kvrpcpb.APIVersion_V2 {
+	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
 		key = append([]byte{'r'}, key...)
 	}
 
@@ -429,7 +449,7 @@ func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte
 		metrics.TiKVRawkvCmdHistogram.WithLabelValues(label).Observe(time.Since(start).Seconds())
 	}()
 
-	if c.apiVersion == kvrpcpb.APIVersion_V2 {
+	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
 		startKey = append([]byte{'r'}, startKey...)
 		if len(endKey) != 0 {
 			endKey = append([]byte{'r'}, endKey...)
@@ -478,7 +498,7 @@ func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, o
 	rctx := kvrpcpb.Context{
 		ApiVersion: c.apiVersion,
 	}
-	if c.apiVersion == kvrpcpb.APIVersion_V2 {
+	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
 		startKey = append([]byte{'r'}, startKey...)
 		if len(endKey) != 0 {
 			endKey = append([]byte{'r'}, endKey...)
@@ -487,7 +507,7 @@ func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, o
 		}
 	}
 	decodeKey := func(key []byte) []byte {
-		if c.apiVersion == kvrpcpb.APIVersion_V2 {
+		if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
 			return key[1:]
 		}
 		return key
@@ -542,6 +562,9 @@ func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit
 
 	opts := c.getRawKVOptions(options...)
 
+	rctx := kvrpcpb.Context{
+		ApiVersion: c.apiVersion,
+	}
 	for len(keys) < limit && bytes.Compare(startKey, endKey) > 0 {
 		req := tikvrpc.NewRequest(tikvrpc.CmdRawScan, &kvrpcpb.RawScanRequest{
 			StartKey: startKey,
@@ -550,7 +573,7 @@ func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit
 			Reverse:  true,
 			KeyOnly:  opts.KeyOnly,
 			Cf:       c.getColumnFamily(opts),
-		})
+		}, rctx)
 		resp, loc, err := c.sendReq(ctx, startKey, req, true)
 		if err != nil {
 			return nil, nil, err
@@ -602,7 +625,10 @@ func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValu
 		reqArgs.PreviousValue = previousValue
 	}
 
-	req := tikvrpc.NewRequest(tikvrpc.CmdRawCompareAndSwap, &reqArgs)
+	rctx := kvrpcpb.Context{
+		ApiVersion: c.apiVersion,
+	}
+	req := tikvrpc.NewRequest(tikvrpc.CmdRawCompareAndSwap, &reqArgs, rctx)
 	req.MaxExecutionDurationMs = uint64(client.MaxWriteExecutionTime.Milliseconds())
 	resp, _, err := c.sendReq(ctx, key, req, false)
 	if err != nil {
@@ -704,19 +730,22 @@ func (c *Client) sendBatchReq(bo *retry.Backoffer, keys [][]byte, options *rawOp
 }
 
 func (c *Client) doBatchReq(bo *retry.Backoffer, batch kvrpc.Batch, options *rawOptions, cmdType tikvrpc.CmdType) kvrpc.BatchResult {
+	rctx := kvrpcpb.Context{
+		ApiVersion: c.apiVersion,
+	}
 	var req *tikvrpc.Request
 	switch cmdType {
 	case tikvrpc.CmdRawBatchGet:
 		req = tikvrpc.NewRequest(cmdType, &kvrpcpb.RawBatchGetRequest{
 			Keys: batch.Keys,
 			Cf:   c.getColumnFamily(options),
-		})
+		}, rctx)
 	case tikvrpc.CmdRawBatchDelete:
 		req = tikvrpc.NewRequest(cmdType, &kvrpcpb.RawBatchDeleteRequest{
 			Keys:   batch.Keys,
 			Cf:     c.getColumnFamily(options),
 			ForCas: c.atomic,
-		})
+		}, rctx)
 	}
 
 	sender := locate.NewRegionRequestSender(c.regionCache, c.rpcClient)
@@ -862,6 +891,10 @@ func (c *Client) doBatchPut(bo *retry.Backoffer, batch kvrpc.Batch, opts *rawOpt
 	if len(batch.TTLs) > 0 {
 		ttl = batch.TTLs[0]
 	}
+
+	rctx := kvrpcpb.Context{
+		ApiVersion: c.apiVersion,
+	}
 	req := tikvrpc.NewRequest(tikvrpc.CmdRawBatchPut,
 		&kvrpcpb.RawBatchPutRequest{
 			Pairs:  kvPair,
@@ -869,7 +902,7 @@ func (c *Client) doBatchPut(bo *retry.Backoffer, batch kvrpc.Batch, opts *rawOpt
 			ForCas: c.atomic,
 			Ttls:   batch.TTLs,
 			Ttl:    ttl,
-		})
+		}, rctx)
 
 	sender := locate.NewRegionRequestSender(c.regionCache, c.rpcClient)
 	req.MaxExecutionDurationMs = uint64(client.MaxWriteExecutionTime.Milliseconds())
