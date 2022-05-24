@@ -42,8 +42,8 @@ func main() {
 	value := []byte(os.Args[4])
 
 	// cli, err := rawkv.NewClient(context.TODO(), []string{pd}, config.DefaultConfig().Security)
-	// cli, err := rawkv.NewClientV2(context.TODO(), []string{pd}, config.DefaultConfig().Security)
-	cli, err := rawkv.NewClientV2NoPrefix(context.TODO(), []string{pd}, config.DefaultConfig().Security)
+	cli, err := rawkv.NewClientV2(context.TODO(), []string{pd}, config.DefaultConfig().Security)
+	// cli, err := rawkv.NewClientV2NoPrefix(context.TODO(), []string{pd}, config.DefaultConfig().Security)
 	if err != nil {
 		panic(err)
 	}
@@ -93,7 +93,7 @@ func main() {
 			panic(err)
 		}
 		for i := range keys {
-			fmt.Printf("(%v, %v), ", hex.EncodeToString(keys[i]), hex.EncodeToString(values[i]))
+			fmt.Printf("(%v, %v)\n", hex.EncodeToString(keys[i]), hex.EncodeToString(values[i]))
 		}
 		fmt.Println("")
 	} else if oper == "del-range" {
@@ -103,5 +103,18 @@ func main() {
 			panic(err)
 		}
 		fmt.Println("success")
+	} else if oper == "cas" {
+		newValue := []byte(os.Args[5])
+		oldValue := []byte(nil)
+		if len(value) != 0 {
+			oldValue = value
+		}
+		var succeed bool
+		cli.SetAtomicForCAS(true)
+		oldValue, succeed, err = cli.CompareAndSwap(context.TODO(), key, oldValue, newValue)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("succeed: %v, oldValue: %v\n", succeed, oldValue)
 	}
 }

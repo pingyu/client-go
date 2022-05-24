@@ -613,6 +613,13 @@ func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValu
 		return nil, false, errors.New("empty value is not supported")
 	}
 
+	rctx := kvrpcpb.Context{
+		ApiVersion: c.apiVersion,
+	}
+	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
+		key = append([]byte{'r'}, key...)
+	}
+
 	opts := c.getRawKVOptions(options...)
 	reqArgs := kvrpcpb.RawCASRequest{
 		Key:   key,
@@ -625,9 +632,6 @@ func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValu
 		reqArgs.PreviousValue = previousValue
 	}
 
-	rctx := kvrpcpb.Context{
-		ApiVersion: c.apiVersion,
-	}
 	req := tikvrpc.NewRequest(tikvrpc.CmdRawCompareAndSwap, &reqArgs, rctx)
 	req.MaxExecutionDurationMs = uint64(client.MaxWriteExecutionTime.Milliseconds())
 	resp, _, err := c.sendReq(ctx, key, req, false)
