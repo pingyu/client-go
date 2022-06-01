@@ -238,7 +238,12 @@ func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]b
 	return cmdResp.Value, nil
 }
 
-const rawkvMaxBackoff = 20000
+var rawkvMaxBackoff int = 20000
+
+// SetGlobalMaxBackoff set the max backoff. Note that it is a global variable and will affect all RawKV clients.
+func (c *Client) SetGlobalMaxBackoff(maxSleepSeconds int) {
+	rawkvMaxBackoff = maxSleepSeconds
+}
 
 // BatchGet queries values with the keys.
 func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOption) ([][]byte, error) {
