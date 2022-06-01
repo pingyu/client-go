@@ -241,7 +241,7 @@ func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]b
 var rawkvMaxBackoff int = 20000
 
 // SetGlobalMaxBackoff set the max backoff. Note that it is a global variable and will affect all RawKV clients.
-func (c *Client) SetGlobalMaxBackoff(maxSleepSeconds int) {
+func SetGlobalMaxBackoff(maxSleepSeconds int) {
 	rawkvMaxBackoff = maxSleepSeconds
 }
 
