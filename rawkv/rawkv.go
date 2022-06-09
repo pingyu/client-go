@@ -152,6 +152,7 @@ func NewClient(ctx context.Context, pdAddrs []string, security config.Security, 
 	}, nil
 }
 
+// NOTE: no raw prefix
 func NewClientV2(ctx context.Context, pdAddrs []string, security config.Security, opts ...pd.ClientOption) (*Client, error) {
 	pdCli, err := tikv.NewPDClient(pdAddrs) // TODO: NewPDClient with security
 	if err != nil {
@@ -163,10 +164,11 @@ func NewClientV2(ctx context.Context, pdAddrs []string, security config.Security
 		pdClient:    pdCli,
 		rpcClient:   client.NewRPCClient(client.WithSecurity(security)),
 		apiVersion:  kvrpcpb.APIVersion_V2,
+		noPrefix:    true,
 	}, nil
 }
 
-func NewClientV2NoPrefix(ctx context.Context, pdAddrs []string, security config.Security, opts ...pd.ClientOption) (*Client, error) {
+func NewClientV2WithPrefix(ctx context.Context, pdAddrs []string, security config.Security, opts ...pd.ClientOption) (*Client, error) {
 	pdCli, err := tikv.NewPDClient(pdAddrs) // TODO: NewPDClient with security
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -177,7 +179,7 @@ func NewClientV2NoPrefix(ctx context.Context, pdAddrs []string, security config.
 		pdClient:    pdCli,
 		rpcClient:   client.NewRPCClient(client.WithSecurity(security)),
 		apiVersion:  kvrpcpb.APIVersion_V2,
-		noPrefix:    true,
+		noPrefix:    false,
 	}, nil
 }
 
@@ -238,12 +240,7 @@ func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]b
 	return cmdResp.Value, nil
 }
 
-var rawkvMaxBackoff int = 20000
-
-// SetGlobalMaxBackoff set the max backoff. Note that it is a global variable and will affect all RawKV clients.
-func SetGlobalMaxBackoff(maxSleepSeconds int) {
-	rawkvMaxBackoff = maxSleepSeconds
-}
+const rawkvMaxBackoff = 20000
 
 // BatchGet queries values with the keys.
 func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOption) ([][]byte, error) {

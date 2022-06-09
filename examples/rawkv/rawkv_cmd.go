@@ -43,8 +43,7 @@ func main() {
 
 	// cli, err := rawkv.NewClient(context.TODO(), []string{pd}, config.DefaultConfig().Security)
 	cli, err := rawkv.NewClientV2(context.TODO(), []string{pd}, config.DefaultConfig().Security)
-	rawkv.SetGlobalMaxBackoff(60000)
-	// cli, err := rawkv.NewClientV2NoPrefix(context.TODO(), []string{pd}, config.DefaultConfig().Security)
+	// cli, err := rawkv.NewClientV2WithPrefix(context.TODO(), []string{pd}, config.DefaultConfig().Security)
 	if err != nil {
 		panic(err)
 	}
