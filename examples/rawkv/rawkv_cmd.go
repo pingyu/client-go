@@ -74,7 +74,11 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("found val: %s for key: %s\n", val, key)
+		if val == nil {
+			fmt.Printf("not found for key: %s\n", key)
+		} else {
+			fmt.Printf("found val: %s for key: %s\n", string(val), key)
+		}
 	} else if oper == "del" {
 		// delete key from tikv
 		err := cli.Delete(context.TODO(), key)
