@@ -211,7 +211,7 @@ func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]b
 		ApiVersion: c.apiVersion,
 	}
 	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
-		key = append([]byte{'r'}, key...)
+		key = append([]byte{'r', 0, 0, 0}, key...)
 	}
 
 	opts := c.getRawKVOptions(options...)
@@ -284,7 +284,7 @@ func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, 
 		ApiVersion: c.apiVersion,
 	}
 	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
-		key = append([]byte{'r'}, key...)
+		key = append([]byte{'r', 0, 0, 0}, key...)
 	}
 
 	opts := c.getRawKVOptions(options...)
@@ -383,7 +383,7 @@ func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) e
 		ApiVersion: c.apiVersion,
 	}
 	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
-		key = append([]byte{'r'}, key...)
+		key = append([]byte{'r', 0, 0, 0}, key...)
 	}
 
 	opts := c.getRawKVOptions(options...)
@@ -443,11 +443,11 @@ func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte
 	}()
 
 	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
-		startKey = append([]byte{'r'}, startKey...)
+		startKey = append([]byte{'r', 0, 0, 0}, startKey...)
 		if len(endKey) != 0 {
-			endKey = append([]byte{'r'}, endKey...)
+			endKey = append([]byte{'r', 0, 0, 0}, endKey...)
 		} else {
-			endKey = []byte{'r' + 1}
+			endKey = []byte{'r', 0, 0, 1}
 		}
 	}
 
@@ -492,11 +492,11 @@ func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, o
 		ApiVersion: c.apiVersion,
 	}
 	if c.apiVersion == kvrpcpb.APIVersion_V2 && !c.noPrefix {
-		startKey = append([]byte{'r'}, startKey...)
+		startKey = append([]byte{'r', 0, 0, 0}, startKey...)
 		if len(endKey) != 0 {
-			endKey = append([]byte{'r'}, endKey...)
+			endKey = append([]byte{'r', 0, 0, 0}, endKey...)
 		} else {
-			endKey = []byte{'r' + 1}
+			endKey = []byte{'r', 0, 0, 1}
 		}
 	}
 	decodeKey := func(key []byte) []byte {
