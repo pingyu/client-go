@@ -262,7 +262,15 @@ func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]b
 	return convertNilToEmptySlice(cmdResp.Value), nil
 }
 
-const rawkvMaxBackoff = 20000
+var rawkvMaxBackoff = 20000
+
+func SetRawKVMaxBackoff(ms int) {
+	rawkvMaxBackoff = ms
+}
+
+func GetRawKVMaxBackoff() int {
+	return rawkvMaxBackoff
+}
 
 // BatchGet queries values with the keys.
 func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOption) ([][]byte, error) {
