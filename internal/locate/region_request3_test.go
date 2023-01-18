@@ -298,7 +298,7 @@ func (s *testRegionRequestToThreeStoresSuite) TestReplicaSelector() {
 	region = &Region{
 		meta: region.GetMeta(),
 	}
-	region.lastAccess = time.Now().Unix()
+	atomic.StoreInt64(&region.lastAccess, time.Now().Unix())
 	region.meta.Peers = append(region.meta.Peers, peer)
 	atomic.StorePointer(&region.store, unsafe.Pointer(regionStore))
 
@@ -371,7 +371,7 @@ func (s *testRegionRequestToThreeStoresSuite) TestReplicaSelector() {
 	s.False(replicaSelector.region.isValid())
 
 	// Test switching to tryFollower if leader is unreachable
-	region.lastAccess = time.Now().Unix()
+	atomic.StoreInt64(&region.lastAccess, time.Now().Unix())
 	replicaSelector, err = newReplicaSelector(cache, regionLoc.Region, req)
 	s.Nil(err)
 	s.NotNil(replicaSelector)
@@ -556,7 +556,7 @@ func (s *testRegionRequestToThreeStoresSuite) TestReplicaSelector() {
 	assertRPCCtxEqual(rpcCtx, replicaSelector.replicas[regionStore.workTiKVIdx], nil)
 
 	// Test accessFollower state filtering label-not-match stores.
-	region.lastAccess = time.Now().Unix()
+	atomic.StoreInt64(&region.lastAccess, time.Now().Unix())
 	refreshEpochs(regionStore)
 	labels := []*metapb.StoreLabel{
 		{
@@ -578,7 +578,7 @@ func (s *testRegionRequestToThreeStoresSuite) TestReplicaSelector() {
 	}
 
 	// Test accessFollower state with leaderOnly option
-	region.lastAccess = time.Now().Unix()
+	atomic.StoreInt64(&region.lastAccess, time.Now().Unix())
 	refreshEpochs(regionStore)
 	for i := 0; i < 5; i++ {
 		replicaSelector, err = newReplicaSelector(cache, regionLoc.Region, req, WithLeaderOnly())
@@ -591,7 +591,7 @@ func (s *testRegionRequestToThreeStoresSuite) TestReplicaSelector() {
 	}
 
 	// Test accessFollower state with kv.ReplicaReadMixed request type.
-	region.lastAccess = time.Now().Unix()
+	atomic.StoreInt64(&region.lastAccess, time.Now().Unix())
 	refreshEpochs(regionStore)
 	req.ReplicaReadType = kv.ReplicaReadMixed
 	replicaSelector, err = newReplicaSelector(cache, regionLoc.Region, req)
@@ -599,7 +599,7 @@ func (s *testRegionRequestToThreeStoresSuite) TestReplicaSelector() {
 	s.Nil(err)
 
 	// Invalidate the region if the leader is not in the region.
-	region.lastAccess = time.Now().Unix()
+	atomic.StoreInt64(&region.lastAccess, time.Now().Unix())
 	replicaSelector.updateLeader(&metapb.Peer{Id: s.cluster.AllocID(), StoreId: s.cluster.AllocID()})
 	s.False(region.isValid())
 	// Don't try next replica if the region is invalidated.
